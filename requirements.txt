@@ -1,0 +1,9 @@
+# Scraper signal-arnaques.com — dépendances Python
+# Installez avec : pip install -r requirements.txt
+# Puis : playwright install chromium
+
+beautifulsoup4>=4.12
+curl-cffi>=0.7
+playwright>=1.44
+playwright-stealth>=2.0
+lxml>=5.0

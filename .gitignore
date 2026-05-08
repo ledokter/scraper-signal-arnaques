@@ -1,0 +1,30 @@
+# Données scrapées (contiennent des données personnelles)
+arnaques_*.json
+arnaques_*.csv
+ids_*.json
+checkpoint_*.json
+
+# Logs
+logs/
+
+# Environnements virtuels
+.venv/
+.venv_win/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Fichier de debug temporaire
+get_cse_token.py
+
+# Obsidian
+.obsidian/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
