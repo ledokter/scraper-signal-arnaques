@@ -1,6 +1,6 @@
-# Données scrapées (contiennent des données personnelles)
-arnaques_*.json
-arnaques_*.csv
+# Fichiers intermédiaires uniquement
+arnaques_*_partial.json
+arnaques_*_partial.csv
 ids_*.json
 checkpoint_*.json
 

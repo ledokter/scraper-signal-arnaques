@@ -1,0 +1,44 @@
+[
+  {
+    "id": "1949",
+    "url": "https://www.signal-arnaques.com/scam/view/1949",
+    "statut": "ARNAQUE SUSPECTÉE !!!",
+    "categorie": "Phishing",
+    "nb_signalements": "9",
+    "date": "19/01/2015",
+    "email": "impots.gouv@dgfip.finances.gouv.fr",
+    "pseudonyme": "Direction générale des finances publiques",
+    "url_arnaque": "",
+    "contenu": "Mail reçu de l'adresse mail suivante: impots.gouv@dgfip.finances.gouv.fr Un logo des impots Français apparait en partie supérieure. Le corps: Bonjour, Après les derniers calculs annuels de l'exercice de votre activité, nous avons déterminé que vous êtes admissible à recevoir un remboursement de 50.80 €. Veuillez nous soumettre s'il vous plaît la demande de remboursement d'impôt pour nous permettre de la traiter dans un plus bref délai. >> Pour accéder au formulaire, cliquez ici. Un remboursement peut être retadré pour diverses raisons. Par exemple, une soumission de dossiers non valides ou une inscription après une certaine limite.",
+    "commentaire": "Plusieurs fautes, un lien factice qui amène à un site bloqué par mon navigateur web (site frauduleux), vous avez à faire à des escrocs qui tentent d'imiter les services publiques !!!! ARNAQUE à laquelle vous ne devez pas répondre, ni transmettre une quelconque information.",
+    "themes": "Impôts, Email"
+  },
+  {
+    "id": "827470",
+    "url": "https://www.signal-arnaques.com/scam/view/827470",
+    "statut": "ARNAQUE SUSPECTÉE !!!",
+    "categorie": "Phishing",
+    "nb_signalements": "1",
+    "date": "26/02/2025",
+    "email": "newsletter@mailto-goagent.net",
+    "pseudonyme": "administration fiscale@impots.gouv",
+    "url_arnaque": "",
+    "contenu": "Reçu mail du pseudo indiqué me renvoyant sur une page \"tout à fait officielle\" de l'administration sous l'adresse newsletter...... ce qui m'obligeait à ouvrir mon dossier fiscal personnel avec mes identifiants pour me voir dire qu'un excédent n'a pu m'être remboursé par le fisc du fait du \"refus par ma banque\" de créditer mon compte. On m'invite alors à envoyer mes coordonnées bancaires pour être réglée dans les meilleurs délais. Je n'ai pas envoyer mes coordonnées bancaires et ai changé de mot de passe.",
+    "commentaire": "ARNAQUE aux coordonnées bancaires via un pseudo-site de l'administration fiscale manifestement.",
+    "themes": "Impôts, Email"
+  },
+  {
+    "id": "803485",
+    "url": "https://www.signal-arnaques.com/scam/view/803485",
+    "statut": "ARNAQUE SUSPECTÉE !!!",
+    "categorie": "Arnaques financières",
+    "nb_signalements": "3",
+    "date": "18/11/2024",
+    "email": "info@gydzuk.com",
+    "pseudonyme": "",
+    "url_arnaque": "impôts.gouv",
+    "contenu": "Paiment dune amende en ligne",
+    "commentaire": "Il demande un paiement en ligne d amende",
+    "themes": "Impôts"
+  }
+]
