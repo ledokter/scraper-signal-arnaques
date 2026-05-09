@@ -275,6 +275,7 @@ class App(tk.Tk):
         opt_frame.pack(fill="x", padx=8, pady=2)
         self._debug_var  = tk.BooleanVar(value=True)
         self._resume_var = tk.BooleanVar(value=False)
+        self._proxy_var  = tk.BooleanVar(value=False)
         tk.Checkbutton(opt_frame, text="Debug (logs fichier)",
                        variable=self._debug_var,
                        bg=BG, fg=FG2, selectcolor=ACCENT,
@@ -283,6 +284,10 @@ class App(tk.Tk):
                        variable=self._resume_var,
                        bg=BG, fg=FG2, selectcolor=ACCENT,
                        activebackground=BG, font=FONT_S).pack(side="left", padx=8)
+        tk.Checkbutton(opt_frame, text="Proxy FR (--proxy)",
+                       variable=self._proxy_var,
+                       bg=BG, fg=FG2, selectcolor=ACCENT,
+                       activebackground=BG, font=FONT_S).pack(side="left")
 
         self._section(parent, "Actions")
         self._ids_status = tk.Label(parent, text="", bg=BG, fg=FG2, font=FONT_S,
@@ -884,6 +889,8 @@ class App(tk.Tk):
             cmd.append("--resume")
         if self._debug_var.get():
             cmd.append("--debug")
+        if self._proxy_var.get():
+            cmd.append("--proxy")
         try:
             dlo = float(self._delay_lo_var.get())
             dhi = float(self._delay_hi_var.get())
