@@ -121,27 +121,33 @@ def load_checkpoint(tag: str) -> dict | None:
 
 
 def save_checkpoint(tag: str, all_ids: list, done_ids: set,
-                    started_at: str, details: list):
+                    started_at: str, details: list,
+                    failed_ids: set | None = None):
     stem    = f"arnaques_{tag}"
     partial = Path(f"{stem}_partial.json")
     if details:
         with open(partial, "w", encoding="utf-8") as f:
             json.dump(details, f, ensure_ascii=False, indent=2)
 
+    failed = sorted(failed_ids or set())
     cp = {
         "tag":          tag,
         "all_ids":      all_ids,
         "done_ids":     sorted(done_ids),
+        "failed_ids":   failed,
         "started_at":   started_at,
         "last_updated": datetime.now().isoformat(timespec="seconds"),
         "done_count":   len(done_ids),
         "total_count":  len(all_ids),
+        "failed_count": len(failed),
+        "pending_count": len(all_ids) - len(done_ids) - len(failed),
         "partial_file": str(partial) if details else "",
     }
     checkpoint_path(tag).write_text(
         json.dumps(cp, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    logger.debug(f"Checkpoint sauvegardé : {len(done_ids)}/{len(all_ids)}")
+    logger.debug(f"Checkpoint : {len(done_ids)} OK / {len(failed)} échecs / "
+                 f"{cp['pending_count']} en attente")
 
 
 def delete_checkpoint(tag: str):
@@ -524,7 +530,15 @@ def main():
                     help=f"Délai min/max entre requêtes en secondes "
                          f"(défaut: {DEFAULT_DELAY_LO} {DEFAULT_DELAY_HI}). "
                          f"Augmentez si vous avez des erreurs 1015.")
+    ap.add_argument("--status",   action="store_true",
+                    help="Afficher le rapport de couverture (tags scrapés, manquants, en cours) sans scraper")
     args = ap.parse_args()
+
+    # --status : rapport de couverture et sortie immédiate
+    if args.status:
+        from tag_manager import print_coverage_report
+        print_coverage_report()
+        return
 
     tag  = args.tag.lower().strip()
     stem = f"arnaques_{tag}"
@@ -589,32 +603,41 @@ def main():
     # ── 3. Reprise depuis checkpoint ───────────────────────
     details     = []
     done_ids    = set()
+    failed_ids  = set()
     started_at  = datetime.now().isoformat(timespec="seconds")
 
     if args.resume:
         cp = load_checkpoint(tag)
         if cp:
             done_ids   = set(cp["done_ids"])
+            failed_ids = set(cp.get("failed_ids", []))
             started_at = cp.get("started_at", started_at)
-            # Fusionner les IDs du checkpoint avec ceux récents
-            all_ids = list(dict.fromkeys(cp["all_ids"] + all_ids))
-            partial = Path(f"{stem}_partial.json")
+            all_ids    = list(dict.fromkeys(cp["all_ids"] + all_ids))
+            partial    = Path(f"{stem}_partial.json")
             if partial.exists():
                 try:
                     details = json.loads(partial.read_text(encoding="utf-8"))
                 except Exception:
                     details = []
-            logger.info(f"[REPRISE] Checkpoint trouvé : {len(done_ids)}/{len(cp['all_ids'])} déjà traités.")
-            print(f"  [REPRISE] {len(done_ids)} IDs déjà traités, "
-                  f"{len(all_ids) - len(done_ids)} restants.\n")
+            pending = len(all_ids) - len(done_ids) - len(failed_ids)
+            logger.info(f"[REPRISE] {len(done_ids)} OK / {len(failed_ids)} échecs / {pending} en attente")
+            print(f"  [REPRISE] {len(done_ids)} OK  {len(failed_ids)} échecs à retenter  {pending} nouveaux\n")
         else:
             logger.warning("[REPRISE] Aucun checkpoint trouvé, démarrage normal.")
             print("  [REPRISE] Aucun checkpoint trouvé — démarrage normal.\n")
 
+    # IDs à traiter = pending + retry des échecs (mais pas les déjà OK)
     remaining = [sid for sid in all_ids if sid not in done_ids]
-    logger.info(f"[3] Scraping de {len(remaining)} pages de détail"
-                f" ({len(done_ids)} déjà faits)...\n")
-    print(f"\n[3] Scraping des {len(remaining)} pages de détail...\n")
+    # Mettre les échecs précédents en fin de liste (retry après les nouveaux)
+    failed_retry = [sid for sid in remaining if sid in failed_ids]
+    new_pending  = [sid for sid in remaining if sid not in failed_ids]
+    remaining    = new_pending + failed_retry
+    failed_ids   = set()  # reset : on retente tout
+
+    logger.info(f"[3] Scraping de {len(remaining)} pages ({len(new_pending)} nouveaux + "
+                f"{len(failed_retry)} échecs relancés)...\n")
+    print(f"\n[3] Scraping de {len(remaining)} pages"
+          f"  ({len(new_pending)} nouveaux + {len(failed_retry)} échecs relancés)...\n")
 
     errors          = 0
     consecutive_ban = 0
@@ -629,30 +652,34 @@ def main():
             logger.warning(f"  BAN détecté ({consecutive_ban}/{BAN_CONSECUTIVE_THRESHOLD})")
             print(f"  [BAN {consecutive_ban}/{BAN_CONSECUTIVE_THRESHOLD}] Cloudflare a bloqué l'IP.")
             if consecutive_ban >= BAN_CONSECUTIVE_THRESHOLD:
-                save_checkpoint(tag, all_ids, done_ids, started_at, details)
+                # Ajouter les IDs non traités dans failed_ids
+                remaining_sids = {s for s in remaining[i-1:]}
+                failed_ids.update(remaining_sids)
+                save_checkpoint(tag, all_ids, done_ids, started_at, details, failed_ids)
                 save(details, stem + "_partial", DETAIL_FIELDS)
                 print(f"\n[BAN_DETECTED]")
-                print(f"  Trop de blocages consécutifs.")
-                print(f"  Checkpoint sauvegardé : {len(done_ids)}/{len(all_ids)} traités.")
+                print(f"  Checkpoint : {len(done_ids)} OK / {len(failed_ids)} en attente.")
                 print(f"  -> Changez d'IP (VPN), puis relancez :")
                 print(f"     python scraper_signal_arnaques.py --detail --tag {tag} --resume\n")
                 sys.exit(2)
             pause(15, 25)
+            failed_ids.add(sid)
             continue
         else:
             consecutive_ban = 0
 
         if not html:
-            logger.error(f"  ÉCHEC {url}")
+            logger.error(f"  ÉCHEC réseau {url}")
             print(f"  [{i:>4}/{len(remaining)}] ECHEC  {url}")
             errors += 1
-            done_ids.add(sid)
+            failed_ids.add(sid)   # ← tracké pour retry
             pause(3, 6)
             continue
 
         data = parse_detail_page(html, url)
         details.append(data)
         done_ids.add(sid)
+        failed_ids.discard(sid)   # ← retiré des échecs si succès
 
         label = (data.get("email") or data.get("url_arnaque")
                  or data.get("pseudonyme") or sid)
@@ -663,18 +690,23 @@ def main():
 
         # Sauvegarde checkpoint toutes les 10 arnaques
         if i % 10 == 0:
-            save_checkpoint(tag, all_ids, done_ids, started_at, details)
+            save_checkpoint(tag, all_ids, done_ids, started_at, details, failed_ids)
             logger.debug(f"  Checkpoint intermédiaire : {len(done_ids)}/{len(all_ids)}")
 
-        pause(2.0, 4.5)
+        pause(_DELAY_LO, _DELAY_HI)
 
     print()
     save(details, stem, DETAIL_FIELDS)
-    delete_checkpoint(tag)
+
+    if not failed_ids:
+        delete_checkpoint(tag)
+    else:
+        save_checkpoint(tag, all_ids, done_ids, started_at, details, failed_ids)
+        print(f"  [!] {len(failed_ids)} IDs en échec sauvegardés — relancez avec --resume pour retenter.")
 
     ok_n = sum(1 for d in details if d.get("date"))
-    print(f"\nTerminé : {ok_n} OK / {errors} échecs / {len(details)} total.\n")
-    logger.info(f"Fin : {ok_n} OK, {errors} échecs, {len(details)} total.")
+    print(f"\nTerminé : {ok_n} OK / {errors} échecs réseau / {len(failed_ids)} à retenter / {len(details)} total.\n")
+    logger.info(f"Fin : {ok_n} OK, {errors} échecs réseau, {len(failed_ids)} à retenter, {len(details)} total.")
 
 
 if __name__ == "__main__":
