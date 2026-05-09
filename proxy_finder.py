@@ -30,126 +30,184 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-# ── Patch asyncio Python 3.10+ : loop= supprimé de toutes les primitives ─────
-# ProxyBroker (2016) utilise asyncio.Event/Lock/Semaphore/Queue avec loop=
-import asyncio as _aio
-
-
-def _strip_loop(orig):
-    """Retourne un __init__ qui ignore silencieusement le kwarg loop=."""
-    def _patched(self, *args, **kw):
-        kw.pop("loop", None)
-        orig(self, *args, **kw)
-    return _patched
-
-
-for _cls in (_aio.Queue, _aio.Event, _aio.Lock,
-             _aio.Semaphore, _aio.BoundedSemaphore, _aio.Condition):
-    _cls.__init__ = _strip_loop(_cls.__init__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CMD : find
+# CMD : find  (sans ProxyBroker — APIs publiques + test curl_cffi)
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Sources publiques filtrées par pays et protocole
+_PROXY_SOURCES = [
+    # proxyscrape — résultats directs host:port, filtre pays et proto
+    "https://api.proxyscrape.com/v2/?request=getproxies&protocol={proto}&timeout=5000&country={country}&ssl=all&anonymity=all",
+    # proxy-list.download — filtre pays, elite seulement
+    "https://www.proxy-list.download/api/v1/get?type={proto}&anon=elite&country={country}",
+]
+# Fallback générique (pas de filtre pays) si les sources filtrées donnent peu de résultats
+_PROXY_FALLBACK = [
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/{proto}.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/{proto}.txt",
+]
+
+
+def _fetch_url(url: str, timeout: int = 15) -> str:
+    """Télécharge une URL et retourne le texte brut."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return ""
+
+
+def _parse_host_port(text: str) -> list[tuple[str, int]]:
+    """Extrait les paires (host, port) d'un texte brut ligne par ligne."""
+    result = []
+    for line in text.splitlines():
+        line = line.strip()
+        if ":" not in line:
+            continue
+        parts = line.split(":")
+        if len(parts) >= 2:
+            host = parts[0].strip()
+            port_str = parts[1].strip().split()[0]
+            if port_str.isdigit() and 1 <= int(port_str) <= 65535:
+                # Valider que c'est bien une IP ou un hostname
+                import re
+                if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
+                    result.append((host, int(port_str)))
+    return result
+
 
 def cmd_find(args):
-    pb_path = UA_DIR / "ProxyBroker"
-    if pb_path.exists():
-        sys.path.insert(0, str(pb_path))
-
-    try:
-        from proxybroker import Broker  # noqa: F401
-    except ImportError as e:
-        print(f"[ERREUR] ProxyBroker non disponible : {e}")
-        print(f"  Chemin testé : {pb_path}")
-        print(f"  Installez avec : pip install proxybroker")
-        sys.exit(1)
-
-    import asyncio
+    """
+    Trouve des proxies depuis des APIs publiques, les teste avec curl_cffi,
+    et sauvegarde les proxies valides dans le fichier JSON.
+    ProxyBroker n'est pas utilisé (incompatible Python 3.10+).
+    """
+    import concurrent.futures
+    import re
 
     countries = [c.upper().strip() for c in args.countries if c.strip()]
     limit     = args.limit
     out_path  = Path(args.output)
-
-    type_map = {
-        "HTTP":   ("HTTP",   ("Anonymous", "High")),
-        "HTTPS":  ("HTTPS",  ("Anonymous", "High")),
-        "SOCKS4": ("SOCKS4", None),
-        "SOCKS5": ("SOCKS5", None),
-    }
-    types = []
-    for t in args.types:
-        entry = type_map.get(t.upper())
-        if entry:
-            proto, anon = entry
-            types.append((proto, anon) if anon else proto)
+    protos    = [t.lower() for t in args.types
+                 if t.lower() in ("http", "https", "socks4", "socks5")]
 
     print(f"[FIND] Pays   : {', '.join(countries)}")
-    print(f"[FIND] Types  : {', '.join(args.types)}")
+    print(f"[FIND] Types  : {', '.join(p.upper() for p in protos)}")
     print(f"[FIND] Limite : {limit}")
     print(f"[FIND] Sortie : {out_path}")
-    print("[FIND] Démarrage... (peut prendre plusieurs minutes)")
+    print("[FIND] Récupération des listes publiques...")
     sys.stdout.flush()
 
-    found = []
+    # ── Collecter les candidats ───────────────────────────────────────────────
+    candidates: set[tuple[str, int, str, str]] = set()  # (host, port, proto, country)
 
-    async def _run():
-        queue  = asyncio.Queue()
-        # Vrais noms de paramètres dans cette version de ProxyBroker :
-        # max_concurrent_conn (pas max_conn), attempts_conn (pas max_tries)
-        broker = Broker(queue, timeout=8, max_concurrent_conn=100,
-                        attempts_conn=2, verify_ssl=False)
+    for proto in protos:
+        if proto not in ("http", "https"):
+            # SOCKS4/5 : sources différentes
+            for cc in countries:
+                url = f"https://api.proxyscrape.com/v2/?request=getproxies&protocol={proto}&timeout=5000&country={cc}"
+                text = _fetch_url(url)
+                for host, port in _parse_host_port(text):
+                    candidates.add((host, port, proto, cc))
+                if text:
+                    print(f"  [+] {proto.upper()} {cc} : {len(_parse_host_port(text))} candidats depuis proxyscrape")
+                    sys.stdout.flush()
+            continue
 
-        def _geo(proxy):
-            """Supporte geo dict {'code':..} et geo objet avec .code"""
-            g = proxy.geo
-            if g is None:
-                return "??", ""
-            if isinstance(g, dict):
-                return g.get("code", "??"), g.get("city", "")
-            return getattr(g, "code", "??"), getattr(g, "city", "")
+        for cc in countries:
+            for tpl in _PROXY_SOURCES:
+                url  = tpl.format(proto=proto, country=cc.lower())
+                text = _fetch_url(url)
+                pairs = _parse_host_port(text)
+                before = len(candidates)
+                for host, port in pairs:
+                    candidates.add((host, port, proto, cc))
+                added = len(candidates) - before
+                if pairs:
+                    src = url.split("/")[2][:30]
+                    print(f"  [+] {proto.upper()} {cc} via {src} : {added} nouveaux candidats")
+                    sys.stdout.flush()
 
-        async def _collect():
-            while True:
-                proxy = await queue.get()
-                if proxy is None:
-                    break
-                country, city = _geo(proxy)
-                # types peut être un set ou un dict dans cette version
-                if isinstance(proxy.types, dict):
-                    proto = next(iter(proxy.types), "HTTP")
-                else:
-                    proto = next(iter(proxy.types), "HTTP") if proxy.types else "HTTP"
-                anon = (proxy.anonymity if isinstance(proxy.anonymity, str)
-                        else getattr(proxy.anonymity, "level", "?"))
-                info = {
-                    "host":      proxy.host,
-                    "port":      proxy.port,
-                    "protocol":  str(proto),
-                    "anonymity": str(anon),
-                    "country":   country,
-                    "city":      city,
-                }
-                found.append(info)
-                print(f"  [+] {proxy.host}:{proxy.port}  {proto}  {anon}  {country} {city}")
+    # Fallback si peu de résultats
+    if len(candidates) < limit * 2:
+        print(f"  [fallback] Peu de candidats ({len(candidates)}), ajout de listes génériques...")
+        sys.stdout.flush()
+        for proto in protos:
+            if proto not in ("http", "https"):
+                continue
+            for tpl in _PROXY_FALLBACK:
+                url  = tpl.format(proto=proto)
+                text = _fetch_url(url)
+                before = len(candidates)
+                for host, port in _parse_host_port(text):
+                    candidates.add((host, port, proto, "??"))
+                print(f"  [fallback] {proto.upper()} : +{len(candidates)-before} candidats")
                 sys.stdout.flush()
 
-        # broker.find() pousse None dans la queue quand terminé (_done())
-        # _collect() s'arrête sur None → les deux coroutines se terminent proprement
-        await asyncio.gather(
-            broker.find(types=types, countries=countries, limit=limit),
-            _collect(),
-        )
+    if not candidates:
+        print("[ERREUR] Aucun proxy candidat trouvé. Vérifiez la connexion Internet.")
+        sys.stdout.flush()
+        return
 
-    try:
-        asyncio.run(_run())
-    except Exception as e:
-        print(f"[ERREUR] {e}")
-        import traceback
-        traceback.print_exc()
+    # Limiter à limit×4 pour ne pas tester trop longtemps
+    all_candidates = list(candidates)[: limit * 4]
+    print(f"\n[TEST] {len(all_candidates)} candidats à tester (timeout 8s)...")
+    sys.stdout.flush()
 
-    # Fusionner avec l'existant (dédupliquer)
-    existing = []
+    # ── Tester en parallèle avec curl_cffi ────────────────────────────────────
+    found: list[dict] = []
+    tested = 0
+    workers = min(25, max(10, len(all_candidates) // 4))
+
+    def _test(entry: tuple[str, int, str, str]):
+        host, port, proto, country = entry
+        proxy_url_str = f"{proto}://{host}:{port}"
+        try:
+            import curl_cffi.requests as cffi_req
+            s  = cffi_req.Session(impersonate="chrome124")
+            t0 = time.time()
+            r  = s.get("https://httpbin.org/ip",
+                       proxies={"http": proxy_url_str, "https": proxy_url_str},
+                       timeout=8)
+            elapsed = round(time.time() - t0, 2)
+            if r.status_code == 200:
+                return host, port, proto, country, elapsed
+        except Exception:
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = list(concurrent.futures.as_completed(
+            {ex.submit(_test, e): e for e in all_candidates}
+        ))
+        for fut in futs:
+            tested += 1
+            result = fut.result()
+            if result:
+                host, port, proto, country, elapsed = result
+                info = {
+                    "host":      host,
+                    "port":      port,
+                    "protocol":  proto.upper(),
+                    "anonymity": "Unknown",
+                    "country":   country,
+                    "city":      "",
+                }
+                found.append(info)
+                print(f"  [OK] {host}:{port}  {proto.upper()}  {country}  {elapsed}s")
+                sys.stdout.flush()
+                if len(found) >= limit:
+                    break
+            if tested % 30 == 0:
+                print(f"  ... {tested}/{len(all_candidates)} testés  {len(found)} valides")
+                sys.stdout.flush()
+
+    # ── Fusionner avec l'existant ─────────────────────────────────────────────
+    existing: list[dict] = []
     if out_path.exists():
         try:
             data = json.loads(out_path.read_text(encoding="utf-8"))
@@ -168,7 +226,7 @@ def cmd_find(args):
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\n[DONE] {len(found)} trouvés  +{new_count} nouveaux  "
+    print(f"\n[DONE] {len(found)} valides  +{new_count} nouveaux  "
           f"{len(existing)} total → {out_path.name}")
     sys.stdout.flush()
 
