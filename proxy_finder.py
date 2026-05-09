@@ -95,18 +95,33 @@ def cmd_find(args):
 
     async def _run():
         queue  = asyncio.Queue()
-        broker = Broker(queue, timeout=8, max_conn=100, max_tries=2, verify_ssl=False)
+        # Vrais noms de paramètres dans cette version de ProxyBroker :
+        # max_concurrent_conn (pas max_conn), attempts_conn (pas max_tries)
+        broker = Broker(queue, timeout=8, max_concurrent_conn=100,
+                        attempts_conn=2, verify_ssl=False)
+
+        def _geo(proxy):
+            """Supporte geo dict {'code':..} et geo objet avec .code"""
+            g = proxy.geo
+            if g is None:
+                return "??", ""
+            if isinstance(g, dict):
+                return g.get("code", "??"), g.get("city", "")
+            return getattr(g, "code", "??"), getattr(g, "city", "")
 
         async def _collect():
             while True:
                 proxy = await queue.get()
                 if proxy is None:
                     break
-                country = proxy.geo.code if proxy.geo else "??"
-                city    = getattr(proxy.geo, "city", "") or ""
-                proto   = list(proxy.types)[0] if proxy.types else "HTTP"
-                anon    = (proxy.anonymity if isinstance(proxy.anonymity, str)
-                           else getattr(proxy.anonymity, "level", "?"))
+                country, city = _geo(proxy)
+                # types peut être un set ou un dict dans cette version
+                if isinstance(proxy.types, dict):
+                    proto = next(iter(proxy.types), "HTTP")
+                else:
+                    proto = next(iter(proxy.types), "HTTP") if proxy.types else "HTTP"
+                anon = (proxy.anonymity if isinstance(proxy.anonymity, str)
+                        else getattr(proxy.anonymity, "level", "?"))
                 info = {
                     "host":      proxy.host,
                     "port":      proxy.port,
@@ -119,6 +134,8 @@ def cmd_find(args):
                 print(f"  [+] {proxy.host}:{proxy.port}  {proto}  {anon}  {country} {city}")
                 sys.stdout.flush()
 
+        # broker.find() pousse None dans la queue quand terminé (_done())
+        # _collect() s'arrête sur None → les deux coroutines se terminent proprement
         await asyncio.gather(
             broker.find(types=types, countries=countries, limit=limit),
             _collect(),
