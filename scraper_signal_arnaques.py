@@ -36,6 +36,11 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup
 import curl_cffi.requests as cffi_req
+from ua_rotation import (
+    get_random_profile, get_ua_string, get_random_proxy,
+    proxy_url, build_playwright_context_options,
+    generate_injection_script, log_profile,
+)
 
 # Force UTF-8 sur la console Windows
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -175,22 +180,58 @@ def is_banned(html: str) -> bool:
 # Session HTTP curl_cffi
 # ──────────────────────────────────────────────────────────
 
-# Profils d'impersonation à rotation
-_IMPERSONATE_PROFILES = [
-    "chrome124", "chrome123", "chrome120", "chrome119",
-    "chrome116", "chrome110",
-]
+# Mapping UA browser -> profil curl_cffi
+_CURL_PROFILE_MAP = {
+    "chrome129": "chrome124", "chrome128": "chrome124", "chrome127": "chrome124",
+    "chrome126": "chrome124", "chrome125": "chrome124", "chrome124": "chrome124",
+    "chrome123": "chrome123", "chrome122": "chrome120", "chrome121": "chrome120",
+    "chrome120": "chrome120", "chrome119": "chrome119", "chrome116": "chrome116",
+    "edge128": "chrome124",   "edge127": "chrome123",
+}
+_IMPERSONATE_FALLBACK = ["chrome124", "chrome123", "chrome120", "chrome119", "chrome116"]
 _profile_idx = 0
 
-def make_session() -> cffi_req.Session:
+
+def _pick_curl_profile(ua_string: str) -> str:
+    """Déduit le profil curl_cffi le plus proche du UA string."""
+    import re
+    m = re.search(r"Chrome/(\d+)", ua_string)
+    if m:
+        key = f"chrome{m.group(1)}"
+        if key in _CURL_PROFILE_MAP:
+            return _CURL_PROFILE_MAP[key]
+        # Arrondir vers le bas au plus proche disponible
+        ver = int(m.group(1))
+        candidates = [(int(k.replace("chrome", "")), v)
+                      for k, v in _CURL_PROFILE_MAP.items()
+                      if k.startswith("chrome") and k[6:].isdigit()]
+        candidates = [(v, p) for v, p in candidates if v <= ver]
+        if candidates:
+            return max(candidates, key=lambda x: x[0])[1]
+    return _IMPERSONATE_FALLBACK[_profile_idx % len(_IMPERSONATE_FALLBACK)]
+
+
+def make_session(proxy: dict | None = None) -> cffi_req.Session:
     global _profile_idx
-    profile = _IMPERSONATE_PROFILES[_profile_idx % len(_IMPERSONATE_PROFILES)]
+    ua_profile = get_random_profile(desktop_only=True)
+    log_profile(ua_profile)
+
+    ua_str       = get_ua_string(desktop_only=True)
+    curl_profile = _pick_curl_profile(ua_str)
     _profile_idx += 1
-    logger.debug(f"Création session curl_cffi  profil={profile}")
-    s = cffi_req.Session(impersonate=profile)
+
+    logger.debug(f"curl_cffi profil={curl_profile}  proxy={'oui' if proxy else 'non'}")
+    s = cffi_req.Session(impersonate=curl_profile)
+
+    if proxy:
+        s.proxies = {"http": proxy_url(proxy), "https": proxy_url(proxy)}
+        logger.debug(f"Proxy: {proxy_url(proxy)}")
+
+    lang = ua_profile.get("language", "fr-FR")
     s.headers.update({
+        "User-Agent":         ua_str,
         "Accept":             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language":    "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Language":    f"{lang},{lang[:2]};q=0.9,en;q=0.7",
         "Accept-Encoding":    "gzip, deflate, br",
         "Cache-Control":      "max-age=0",
         "Sec-Fetch-Dest":     "document",
@@ -200,6 +241,7 @@ def make_session() -> cffi_req.Session:
         "Upgrade-Insecure-Requests": "1",
         "Referer":            BASE_URL + "/",
     })
+
     logger.debug(f"Warm-up GET {BASE_URL}")
     r = s.get(BASE_URL, timeout=20)
     logger.debug(f"Warm-up -> HTTP {r.status_code}, {len(r.text)} chars")
@@ -342,7 +384,8 @@ def parse_detail_page(html: str, url: str) -> dict:
 # Collecte IDs via Playwright
 # ──────────────────────────────────────────────────────────
 
-def collect_cse_ids_via_browser(tag: str, headless: bool) -> list[str]:
+def collect_cse_ids_via_browser(tag: str, headless: bool,
+                                proxy: dict | None = None) -> list[str]:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     except ImportError:
@@ -353,19 +396,19 @@ def collect_cse_ids_via_browser(tag: str, headless: bool) -> list[str]:
     all_ids: list[str] = []
     seen: set[str] = set()
 
+    ua_profile = get_random_profile(desktop_only=False)
+    log_profile(ua_profile)
+    ctx_opts   = build_playwright_context_options(ua_profile, proxy)
+    inj_script = generate_injection_script(ua_profile)
+
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
-        page = browser.new_page(
-            locale="fr-FR",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        launch_args = {"headless": headless,
+                       "args": ["--disable-blink-features=AutomationControlled"]}
+        if proxy:
+            launch_args["proxy"] = {"server": proxy_url(proxy)}
+        browser = pw.chromium.launch(**launch_args)
+        page = browser.new_page(**ctx_opts)
+        page.add_init_script(inj_script)
 
         search_url = f"{BASE_URL}/tag/{tag}?q={tag}"
         logger.debug(f"Navigation -> {search_url}")
@@ -473,6 +516,8 @@ def main():
                     help="Reprendre un scrape interrompu depuis le checkpoint")
     ap.add_argument("--debug",    action="store_true", default=True,
                     help="Logs détaillés (console + fichier logs/debug_*.log) — actif par défaut")
+    ap.add_argument("--proxy",    action="store_true",
+                    help="Utiliser un proxy aléatoire depuis Users-agent-random/french_proxies.json")
     ap.add_argument("--delay",    type=float, nargs=2,
                     metavar=("MIN", "MAX"),
                     default=[DEFAULT_DELAY_LO, DEFAULT_DELAY_HI],
@@ -492,9 +537,20 @@ def main():
 
     print(f"\n=== Scraper signal-arnaques.com  |  tag: «{tag}» ===\n")
 
+    # ── Proxy ──────────────────────────────────────────────
+    proxy = None
+    if args.proxy:
+        proxy = get_random_proxy()
+        if proxy:
+            logger.info(f"Proxy actif : {proxy_url(proxy)}")
+            print(f"  Proxy : {proxy_url(proxy)}")
+        else:
+            logger.warning("--proxy demandé mais aucun proxy disponible dans french_proxies.json")
+            print("  [!] Aucun proxy disponible — lancer proxy_useragent_nodetect.py d'abord")
+
     # ── Session HTTP ───────────────────────────────────────
     logger.info("Démarrage session HTTP (warm-up Cloudflare)...")
-    session = make_session()
+    session = make_session(proxy=proxy)
 
     # ── 1. Listing tag ─────────────────────────────────────
     logger.info(f"[1] Listing /tag/{tag}...")
@@ -521,7 +577,7 @@ def main():
     else:
         logger.info(f"[2] Collecte des IDs via Google CSE (navigateur)...")
         logger.info(f"    Conseil : lancez d'abord  python collecter_ids.py --tag {tag}")
-        cse_ids = collect_cse_ids_via_browser(tag, headless=args.headless)
+        cse_ids = collect_cse_ids_via_browser(tag, headless=args.headless, proxy=proxy)
 
     all_ids = list(dict.fromkeys(cse_ids + listing_ids))
     logger.info(f"    {len(all_ids)} IDs uniques collectés.")

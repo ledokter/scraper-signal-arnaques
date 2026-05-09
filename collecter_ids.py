@@ -22,6 +22,10 @@ import re
 import sys
 import time
 from pathlib import Path
+from ua_rotation import (
+    get_random_profile, build_playwright_context_options,
+    generate_injection_script, get_random_proxy, proxy_url, log_profile,
+)
 
 # Force UTF-8 sur la console Windows
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -31,33 +35,34 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 BASE_URL = "https://www.signal-arnaques.com"
 
 
-def collect_ids(tag: str) -> list[str]:
+def collect_ids(tag: str, use_proxy: bool = False) -> list[str]:
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
     search_url = f"{BASE_URL}/tag/{tag}?q={tag}"
     all_ids: list[str] = []
     seen: set[str] = set()
 
+    ua_profile = get_random_profile(desktop_only=False)
+    log_profile(ua_profile) if hasattr(ua_profile, "get") else None
+    proxy      = get_random_proxy() if use_proxy else None
+    ctx_opts   = build_playwright_context_options(ua_profile, proxy)
+    inj_script = generate_injection_script(ua_profile)
+
     print(f"  Ouverture de Chrome sur : {search_url}")
+    if proxy:
+        print(f"  Proxy : {proxy_url(proxy)}")
     print("  (Une fenetre Chrome va s'ouvrir — ne la fermez pas.)\n")
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        page = browser.new_page(
-            locale="fr-FR",
-            viewport={"width": 1280, "height": 800},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
-        page.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        launch_args = {
+            "headless": False,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        if proxy:
+            launch_args["proxy"] = {"server": proxy_url(proxy)}
+        browser = pw.chromium.launch(**launch_args)
+        page = browser.new_page(**ctx_opts)
+        page.add_init_script(inj_script)
 
         page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
 
