@@ -30,17 +30,22 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-# ── Patch asyncio.Queue pour Python 3.10+ (loop= supprimé) ───────────────────
+# ── Patch asyncio Python 3.10+ : loop= supprimé de toutes les primitives ─────
+# ProxyBroker (2016) utilise asyncio.Event/Lock/Semaphore/Queue avec loop=
 import asyncio as _aio
-_orig_q_init = _aio.Queue.__init__
 
 
-def _patched_q_init(self, maxsize=0, **kw):
-    kw.pop("loop", None)
-    _orig_q_init(self, maxsize)
+def _strip_loop(orig):
+    """Retourne un __init__ qui ignore silencieusement le kwarg loop=."""
+    def _patched(self, *args, **kw):
+        kw.pop("loop", None)
+        orig(self, *args, **kw)
+    return _patched
 
 
-_aio.Queue.__init__ = _patched_q_init
+for _cls in (_aio.Queue, _aio.Event, _aio.Lock,
+             _aio.Semaphore, _aio.BoundedSemaphore, _aio.Condition):
+    _cls.__init__ = _strip_loop(_cls.__init__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
