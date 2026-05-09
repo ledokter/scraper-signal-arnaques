@@ -94,7 +94,17 @@ FONT_B  = ("Segoe UI", 10, "bold")
 FONT_S  = ("Segoe UI", 9)
 MONO    = ("Consolas", 9)
 
-HERE = Path(__file__).parent
+HERE       = Path(__file__).parent
+UA_DIR     = HERE / "Users-agent-random"
+PROXY_FILE = UA_DIR / "french_proxies.json"
+
+# Pays proposés dans l'onglet Proxies
+PROXY_COUNTRIES = [
+    ("FR", "France"),    ("DE", "Allemagne"), ("NL", "Pays-Bas"),
+    ("BE", "Belgique"),  ("CH", "Suisse"),    ("ES", "Espagne"),
+    ("IT", "Italie"),    ("PL", "Pologne"),   ("GB", "Royaume-Uni"),
+    ("US", "États-Unis"),("CA", "Canada"),    ("RO", "Roumanie"),
+]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -106,7 +116,8 @@ class App(tk.Tk):
         self.resizable(True, True)
         self.minsize(960, 660)
 
-        self._proc: subprocess.Popen | None = None
+        self._proc:       subprocess.Popen | None = None
+        self._proxy_proc: subprocess.Popen | None = None
         self._all_records: list[dict] = []
 
         self._style_ttk()
@@ -128,7 +139,7 @@ class App(tk.Tk):
               background=[("selected", ACCENT)],
               foreground=[("selected", "white")])
         # Treeview
-        for name in ("Tags", "Words", "Results"):
+        for name in ("Tags", "Words", "Results", "Proxies", "UA"):
             s.configure(f"{name}.Treeview",
                         background=BG2, fieldbackground=BG2,
                         foreground=FG, font=FONT_S,
@@ -160,17 +171,23 @@ class App(tk.Tk):
 
         tab1 = tk.Frame(nb, bg=BG)
         tab2 = tk.Frame(nb, bg=BG)
+        tab3 = tk.Frame(nb, bg=BG)
         nb.add(tab1, text="  ▶  Lanceur  ")
         nb.add(tab2, text="  📊  Stats & Recherche  ")
+        nb.add(tab3, text="  🌐  Proxies & UA  ")
         nb.bind("<<NotebookTabChanged>>",
                 lambda e: self._on_tab_change(nb.index(nb.select())))
 
         self._build_launcher(tab1)
         self._build_stats(tab2)
+        self._build_proxy_tab(tab3)
 
     def _on_tab_change(self, idx):
         if idx == 1:
             self._load_all_data()
+        elif idx == 2:
+            self._refresh_proxy_list()
+            self._refresh_ua_list()
 
     # ══════════════════════════════════════════════════════════════════════════
     # ONGLET 1 — Lanceur
@@ -757,6 +774,417 @@ class App(tk.Tk):
             self.after(0, self._all_progress.config,
                        {"text": f"{len(selected)} / {len(selected)} tags traités"})
             self.after(0, self._set_status, "Scraping total terminé.")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ONGLET 3 — Proxies & User-Agents
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _build_proxy_tab(self, parent):
+        # ── Ligne haute : contrôles (gauche) + mini console (droite) ─────────
+        top = tk.Frame(parent, bg=BG)
+        top.pack(fill="x", padx=8, pady=6)
+
+        ctrl = tk.Frame(top, bg=BG, width=420)
+        ctrl.pack(side="left", fill="y")
+        ctrl.pack_propagate(False)
+
+        mini = tk.Frame(top, bg=BG)
+        mini.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        # ── Contrôles : trouver ───────────────────────────────────────────────
+        self._section(ctrl, "Trouver des proxies  (ProxyBroker)")
+
+        # Pays
+        tk.Label(ctrl, text="Pays :", bg=BG, fg=FG2, font=FONT_S).pack(anchor="w", padx=8)
+        cc_frame = tk.Frame(ctrl, bg=BG)
+        cc_frame.pack(fill="x", padx=8, pady=2)
+        self._cc_vars: dict[str, tk.BooleanVar] = {}
+        for i, (code, label) in enumerate(PROXY_COUNTRIES):
+            var = tk.BooleanVar(value=(code == "FR"))
+            self._cc_vars[code] = var
+            col, row = divmod(i, 3)
+            tk.Checkbutton(cc_frame, text=f"{code} {label}", variable=var,
+                           bg=BG, fg=FG, selectcolor=ACCENT,
+                           activebackground=BG, font=FONT_S,
+                           anchor="w").grid(row=row, column=col, sticky="w", padx=4, pady=0)
+        # Boutons tout/rien
+        cc_btn_row = tk.Frame(ctrl, bg=BG)
+        cc_btn_row.pack(fill="x", padx=8, pady=(0, 2))
+        tk.Button(cc_btn_row, text="Tout", bg=BG2, fg=FG2, relief="flat",
+                  font=FONT_S, cursor="hand2", padx=4,
+                  command=lambda: [v.set(True) for v in self._cc_vars.values()]
+                  ).pack(side="left")
+        tk.Button(cc_btn_row, text="Aucun", bg=BG2, fg=FG2, relief="flat",
+                  font=FONT_S, cursor="hand2", padx=4,
+                  command=lambda: [v.set(False) for v in self._cc_vars.values()]
+                  ).pack(side="left", padx=4)
+        # Pays personnalisés
+        other_row = tk.Frame(ctrl, bg=BG)
+        other_row.pack(fill="x", padx=8, pady=2)
+        tk.Label(other_row, text="Autres (ex: PL CZ) :", bg=BG, fg=FG2, font=FONT_S).pack(side="left")
+        self._cc_other = tk.StringVar()
+        tk.Entry(other_row, textvariable=self._cc_other,
+                 bg=BG2, fg=FG, insertbackground=FG,
+                 relief="flat", font=FONT_M, width=14).pack(side="left", padx=4)
+
+        # Types de proxies
+        tk.Label(ctrl, text="Types :", bg=BG, fg=FG2, font=FONT_S).pack(anchor="w", padx=8, pady=(4, 0))
+        types_row = tk.Frame(ctrl, bg=BG)
+        types_row.pack(fill="x", padx=8, pady=2)
+        self._type_vars: dict[str, tk.BooleanVar] = {}
+        for proto, default in [("HTTP", True), ("HTTPS", True), ("SOCKS4", False), ("SOCKS5", False)]:
+            var = tk.BooleanVar(value=default)
+            self._type_vars[proto] = var
+            tk.Checkbutton(types_row, text=proto, variable=var,
+                           bg=BG, fg=FG, selectcolor=ACCENT,
+                           activebackground=BG, font=FONT_S).pack(side="left", padx=4)
+
+        # Limite + bouton chercher
+        find_row = tk.Frame(ctrl, bg=BG)
+        find_row.pack(fill="x", padx=8, pady=4)
+        tk.Label(find_row, text="Limite :", bg=BG, fg=FG2, font=FONT_S).pack(side="left")
+        self._proxy_limit = tk.StringVar(value="30")
+        tk.Entry(find_row, textvariable=self._proxy_limit,
+                 bg=BG2, fg=FG, insertbackground=FG,
+                 relief="flat", font=FONT_M, width=5).pack(side="left", padx=4)
+        tk.Button(find_row, text="🔍  Chercher des proxies",
+                  bg=ACCENT, fg="white", relief="flat", cursor="hand2",
+                  font=FONT_B, padx=8, pady=4,
+                  command=self._cmd_find_proxies).pack(side="left", padx=8)
+
+        # ── Contrôles : tester ────────────────────────────────────────────────
+        self._section(ctrl, "Tester les proxies chargés")
+
+        url_row = tk.Frame(ctrl, bg=BG)
+        url_row.pack(fill="x", padx=8, pady=2)
+        tk.Label(url_row, text="URL test :", bg=BG, fg=FG2, font=FONT_S).pack(side="left")
+        self._test_url_var = tk.StringVar(value="https://httpbin.org/ip")
+        tk.Entry(url_row, textvariable=self._test_url_var,
+                 bg=BG2, fg=FG, insertbackground=FG,
+                 relief="flat", font=FONT_M, width=28).pack(side="left", padx=4)
+
+        test_row = tk.Frame(ctrl, bg=BG)
+        test_row.pack(fill="x", padx=8, pady=2)
+        workers_row = tk.Frame(ctrl, bg=BG)
+        workers_row.pack(fill="x", padx=8, pady=0)
+        tk.Label(workers_row, text="Threads :", bg=BG, fg=FG2, font=FONT_S).pack(side="left")
+        self._proxy_workers = tk.StringVar(value="10")
+        tk.Entry(workers_row, textvariable=self._proxy_workers,
+                 bg=BG2, fg=FG, insertbackground=FG,
+                 relief="flat", font=FONT_M, width=4).pack(side="left", padx=4)
+        self._remove_invalid_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(workers_row, text="Supprimer invalides",
+                       variable=self._remove_invalid_var,
+                       bg=BG, fg=FG, selectcolor=ACCENT,
+                       activebackground=BG, font=FONT_S).pack(side="left", padx=8)
+
+        tk.Button(test_row, text="🧪  Tester les proxies",
+                  bg="#3a3a5e", fg=ACCENT2, relief="flat", cursor="hand2",
+                  font=FONT_B, padx=8, pady=4,
+                  command=self._cmd_test_proxies).pack(side="left")
+        tk.Button(test_row, text="⏹  Arrêter",
+                  bg="#3a2a2a", fg=DANGER, relief="flat", cursor="hand2",
+                  font=FONT_B, padx=8, pady=4,
+                  command=self._cmd_stop_proxy).pack(side="left", padx=8)
+
+        # ── Mini console proxy ────────────────────────────────────────────────
+        self._section(mini, "Console")
+        self._proxy_console = tk.Text(mini, bg=BG3, fg="#c8ffc8",
+                                      font=MONO, relief="flat",
+                                      state="disabled", wrap="word")
+        pvsb = ttk.Scrollbar(mini, orient="vertical", command=self._proxy_console.yview)
+        self._proxy_console.configure(yscrollcommand=pvsb.set)
+        self._proxy_console.tag_config("info",    foreground="#c8ffc8")
+        self._proxy_console.tag_config("ok",      foreground="#a5d6a7")
+        self._proxy_console.tag_config("warn",    foreground="#ffe082")
+        self._proxy_console.tag_config("error",   foreground="#ef9a9a")
+        self._proxy_console.tag_config("accent",  foreground="#80deea")
+        pvsb.pack(side="right", fill="y")
+        self._proxy_console.pack(fill="both", expand=True)
+
+        tk.Button(mini, text="Vider", bg=BG2, fg=FG2, relief="flat",
+                  font=FONT_S, cursor="hand2", padx=6,
+                  command=self._clear_proxy_console).pack(anchor="e", pady=2)
+
+        # ── Ligne basse : liste proxies (gauche) + UA (droite) ────────────────
+        bot = tk.Frame(parent, bg=BG)
+        bot.pack(fill="both", expand=True, padx=8, pady=(0, 6))
+
+        prx_frame = tk.Frame(bot, bg=BG)
+        prx_frame.pack(side="left", fill="both", expand=True, padx=(0, 6))
+
+        ua_frame = tk.Frame(bot, bg=BG, width=400)
+        ua_frame.pack(side="right", fill="both")
+        ua_frame.pack_propagate(False)
+
+        # ── Treeview proxies ──────────────────────────────────────────────────
+        self._section(prx_frame, "Proxies disponibles")
+        self._proxy_count_label = tk.Label(prx_frame, text="", bg=BG, fg=FG2, font=FONT_S)
+        self._proxy_count_label.pack(anchor="w", padx=8)
+
+        px_tree_frame = tk.Frame(prx_frame, bg=BG)
+        px_tree_frame.pack(fill="both", expand=True, pady=2)
+        px_cols = ("host", "port", "protocol", "anonymity", "country", "city")
+        self._proxy_tree = ttk.Treeview(px_tree_frame, style="Proxies.Treeview",
+                                        columns=px_cols, show="headings",
+                                        selectmode="browse")
+        for col, w in [("host", 140), ("port", 55), ("protocol", 70),
+                       ("anonymity", 100), ("country", 55), ("city", 110)]:
+            self._proxy_tree.heading(col, text=col.capitalize())
+            self._proxy_tree.column(col, width=w, minwidth=40,
+                                    anchor="center" if col in ("port", "country") else "w")
+        px_vsb = ttk.Scrollbar(px_tree_frame, orient="vertical",
+                               command=self._proxy_tree.yview)
+        self._proxy_tree.configure(yscrollcommand=px_vsb.set)
+        px_vsb.pack(side="right", fill="y")
+        self._proxy_tree.pack(fill="both", expand=True)
+
+        px_btn_row = tk.Frame(prx_frame, bg=BG)
+        px_btn_row.pack(fill="x", pady=2)
+        for txt, cmd, fg in [
+            ("⟳ Recharger",          self._refresh_proxy_list,         FG2),
+            ("🗑 Supprimer sélection", self._cmd_delete_selected_proxy, WARNING),
+            ("✕ Vider tout",          self._cmd_clear_proxies,          DANGER),
+        ]:
+            tk.Button(px_btn_row, text=txt, bg=BG2, fg=fg,
+                      relief="flat", cursor="hand2", font=FONT_S, padx=6,
+                      command=cmd).pack(side="left", padx=2)
+
+        # ── Treeview User-Agents ──────────────────────────────────────────────
+        self._section(ua_frame, "User-Agents chargés")
+        self._ua_count_label = tk.Label(ua_frame, text="", bg=BG, fg=FG2, font=FONT_S)
+        self._ua_count_label.pack(anchor="w", padx=8)
+
+        ua_opt_row = tk.Frame(ua_frame, bg=BG)
+        ua_opt_row.pack(fill="x", padx=8, pady=2)
+        self._ua_desktop_only = tk.BooleanVar(value=False)
+        tk.Checkbutton(ua_opt_row, text="Desktop seulement",
+                       variable=self._ua_desktop_only,
+                       bg=BG, fg=FG, selectcolor=ACCENT,
+                       activebackground=BG, font=FONT_S,
+                       command=self._refresh_ua_list).pack(side="left")
+        tk.Button(ua_opt_row, text="⟳ Recharger", bg=BG2, fg=FG2,
+                  relief="flat", cursor="hand2", font=FONT_S, padx=6,
+                  command=self._refresh_ua_list).pack(side="left", padx=8)
+
+        ua_tree_frame = tk.Frame(ua_frame, bg=BG)
+        ua_tree_frame.pack(fill="both", expand=True, pady=2)
+        ua_cols = ("ua", "platform", "language", "os")
+        self._ua_tree = ttk.Treeview(ua_tree_frame, style="UA.Treeview",
+                                     columns=ua_cols, show="headings",
+                                     selectmode="none")
+        self._ua_tree.heading("ua",       text="User-Agent")
+        self._ua_tree.heading("platform", text="Platform")
+        self._ua_tree.heading("language", text="Lang")
+        self._ua_tree.heading("os",       text="OS")
+        self._ua_tree.column("ua",       width=180, minwidth=80)
+        self._ua_tree.column("platform", width=65,  minwidth=50, anchor="center")
+        self._ua_tree.column("language", width=45,  minwidth=40, anchor="center")
+        self._ua_tree.column("os",       width=80,  minwidth=60)
+        ua_vsb = ttk.Scrollbar(ua_tree_frame, orient="vertical",
+                               command=self._ua_tree.yview)
+        self._ua_tree.configure(yscrollcommand=ua_vsb.set)
+        ua_vsb.pack(side="right", fill="y")
+        self._ua_tree.pack(fill="both", expand=True)
+
+    # ── Données proxy ─────────────────────────────────────────────────────────
+
+    def _refresh_proxy_list(self):
+        self._proxy_tree.delete(*self._proxy_tree.get_children())
+        if not PROXY_FILE.exists():
+            self._proxy_count_label.config(
+                text=f"Fichier absent : {PROXY_FILE.name}", fg=WARNING)
+            return
+        try:
+            proxies = json.loads(PROXY_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._proxy_count_label.config(text=f"Erreur lecture : {e}", fg=DANGER)
+            return
+        if not isinstance(proxies, list):
+            proxies = []
+        self._proxy_count_label.config(
+            text=f"{len(proxies)} proxies  ({PROXY_FILE.name})", fg=ACCENT2)
+        for p in proxies:
+            self._proxy_tree.insert("", "end", values=(
+                p.get("host", ""),
+                p.get("port", ""),
+                p.get("protocol", ""),
+                p.get("anonymity", ""),
+                p.get("country", ""),
+                p.get("city", ""),
+            ))
+
+    def _refresh_ua_list(self):
+        self._ua_tree.delete(*self._ua_tree.get_children())
+        ua_files = [
+            UA_DIR / "user_agents.json",
+            UA_DIR / "user_agents_random.json",
+        ]
+        profiles = []
+        for fp in ua_files:
+            if fp.exists():
+                try:
+                    data = json.loads(fp.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        profiles.extend(data)
+                except Exception:
+                    pass
+
+        desktop_only = self._ua_desktop_only.get()
+        if desktop_only:
+            profiles = [p for p in profiles
+                        if p.get("device_type", "").upper() in ("PC", "DESKTOP", "LAPTOP")
+                        or p.get("touch_support") is False]
+
+        self._ua_count_label.config(
+            text=f"{len(profiles)} profils  "
+                 f"({'desktop' if desktop_only else 'tous'})",
+            fg=ACCENT2)
+
+        for p in profiles[:200]:
+            ua   = (p.get("user_agent") or p.get("userAgent") or "")[:60]
+            plat = p.get("platform", "")
+            lang = p.get("language", "")
+            os_  = p.get("os", p.get("device_type", ""))
+            self._ua_tree.insert("", "end", values=(ua, plat, lang, os_))
+
+    # ── Actions proxy ─────────────────────────────────────────────────────────
+
+    def _cmd_find_proxies(self):
+        countries = [cc for cc, var in self._cc_vars.items() if var.get()]
+        others    = [c.strip().upper() for c in self._cc_other.get().split()
+                     if c.strip()]
+        countries += others
+        if not countries:
+            from tkinter import messagebox
+            messagebox.showwarning("Pays manquants", "Sélectionnez au moins un pays.")
+            return
+
+        types = [t for t, var in self._type_vars.items() if var.get()]
+        if not types:
+            from tkinter import messagebox
+            messagebox.showwarning("Type manquant", "Sélectionnez au moins un type.")
+            return
+
+        try:
+            limit = int(self._proxy_limit.get())
+        except ValueError:
+            limit = 30
+
+        script = HERE / "proxy_finder.py"
+        cmd = [sys.executable, str(script), "find",
+               "--countries", *countries,
+               "--types",     *types,
+               "--limit",     str(limit),
+               "--output",    str(PROXY_FILE)]
+
+        self._proxy_log(f"\n{'='*50}\n", "accent")
+        self._proxy_log(f"  Recherche proxies — {', '.join(countries)}  {', '.join(types)}\n", "accent")
+        self._proxy_log(f"{'='*50}\n\n", "accent")
+        self._run_proxy_subprocess(cmd)
+
+    def _cmd_test_proxies(self):
+        script = HERE / "proxy_finder.py"
+        cmd = [sys.executable, str(script), "test",
+               "--input",    str(PROXY_FILE),
+               "--test-url", self._test_url_var.get().strip() or "https://httpbin.org/ip",
+               "--timeout",  "10",
+               "--workers",  self._proxy_workers.get() or "10"]
+        if self._remove_invalid_var.get():
+            cmd.append("--remove-invalid")
+
+        self._proxy_log(f"\n{'='*50}\n", "accent")
+        self._proxy_log(f"  Test des proxies  (remove-invalid={self._remove_invalid_var.get()})\n",
+                        "accent")
+        self._proxy_log(f"{'='*50}\n\n", "accent")
+        self._run_proxy_subprocess(cmd, on_done=self._refresh_proxy_list)
+
+    def _cmd_stop_proxy(self):
+        if self._proxy_proc and self._proxy_proc.poll() is None:
+            self._proxy_proc.terminate()
+            self._proxy_log("\n[Processus proxy arrêté]\n", "warn")
+
+    def _cmd_delete_selected_proxy(self):
+        sel = self._proxy_tree.selection()
+        if not sel:
+            return
+        item  = sel[0]
+        vals  = self._proxy_tree.item(item, "values")
+        host, port = vals[0], str(vals[1])
+        if not PROXY_FILE.exists():
+            return
+        try:
+            proxies = json.loads(PROXY_FILE.read_text(encoding="utf-8"))
+            proxies = [p for p in proxies
+                       if not (p.get("host") == host and str(p.get("port")) == port)]
+            PROXY_FILE.write_text(json.dumps(proxies, indent=2, ensure_ascii=False),
+                                  encoding="utf-8")
+            self._refresh_proxy_list()
+            self._proxy_log(f"  Proxy supprimé : {host}:{port}\n", "warn")
+        except Exception as e:
+            self._proxy_log(f"  Erreur suppression : {e}\n", "error")
+
+    def _cmd_clear_proxies(self):
+        from tkinter import messagebox
+        if not messagebox.askyesno("Vider la liste",
+                                   "Supprimer tous les proxies du fichier ?"):
+            return
+        try:
+            PROXY_FILE.write_text("[]", encoding="utf-8")
+            self._refresh_proxy_list()
+            self._proxy_log("  Liste de proxies vidée.\n", "warn")
+        except Exception as e:
+            self._proxy_log(f"  Erreur : {e}\n", "error")
+
+    # ── Console proxy ─────────────────────────────────────────────────────────
+
+    def _proxy_log(self, text: str, tag: str = "info"):
+        self._proxy_console.configure(state="normal")
+        self._proxy_console.insert("end", text, tag)
+        self._proxy_console.see("end")
+        self._proxy_console.configure(state="disabled")
+
+    def _clear_proxy_console(self):
+        self._proxy_console.configure(state="normal")
+        self._proxy_console.delete("1.0", "end")
+        self._proxy_console.configure(state="disabled")
+
+    def _run_proxy_subprocess(self, cmd: list[str], on_done=None):
+        if self._proxy_proc and self._proxy_proc.poll() is None:
+            from tkinter import messagebox
+            messagebox.showwarning("En cours", "Une opération proxy est déjà en cours.")
+            return
+
+        def _worker():
+            try:
+                self._proxy_proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=str(HERE),
+                )
+                for line in self._proxy_proc.stdout:
+                    tag = (
+                        "ok"    if line.startswith("  [+]") or "OK" in line else
+                        "error" if "ERREUR" in line or "FAIL" in line       else
+                        "warn"  if "[!" in line or "invalide" in line.lower() else
+                        "accent" if line.startswith("[") or "═" in line      else
+                        "info"
+                    )
+                    self.after(0, self._proxy_log, line, tag)
+                self._proxy_proc.wait()
+                code = self._proxy_proc.returncode
+                msg  = "Terminé." if code == 0 else f"Terminé (code {code})."
+                self.after(0, self._proxy_log, f"\n{msg}\n", "ok" if code == 0 else "warn")
+                if on_done:
+                    self.after(200, on_done)
+            except Exception as e:
+                self.after(0, self._proxy_log, f"\n[Erreur interne] {e}\n", "error")
 
         threading.Thread(target=_worker, daemon=True).start()
 
